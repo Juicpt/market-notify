@@ -1,0 +1,15 @@
+{
+    "monitors": [
+        {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "depth": {
+                "percentage": 2,
+                "minValue": 1
+            },
+            "tradeSilence": {
+                "maxSilenceTime": 1
+            }
+        }
+    ]
+}
