@@ -1,9 +1,27 @@
 const ccxt = require('ccxt');
-const { sendLarkNotification } = require('./notifier');
-const { logDepth, logAlert } = require('./db');
+const {sendLarkNotification} = require('./notifier');
+const {logDepth, logAlert} = require('./db');
+
+function inRangeBid(price, mid, pct) {
+    return price >= mid * (1 - pct / 100);
+}
+
+function inRangeAsk(price, mid, pct) {
+    return price <= mid * (1 + pct / 100);
+}
 
 class ExchangeMonitor {
+    // orderBook = 'watchOrderBook'
+    // trade = 'watchTrades'
+    trade = 'fetchTrades'
+    orderBook = 'fetchOrderBook'
+
+
     constructor(exchangeId) {
+        // Instantiate exchange. Note: ccxt.pro exchanges are usually accessed via ccxt.pro.binance, etc.
+        // But in recent versions, they might be under ccxt.pro[exchangeId]
+        const exchangeClass = ccxt.pro[exchangeId] || ccxt[exchangeId];
+        this.exchange = new exchangeClass();
         if (!ccxt.pro[exchangeId]) {
             // Fallback to REST if pro not available, but user requested WS.
             // For now, assume pro is available as per plan.
@@ -11,71 +29,87 @@ class ExchangeMonitor {
             // However, the standard ccxt package includes pro classes but requires authentication/license for some.
             // Many public WS endpoints are free.
             console.warn(`Exchange ${exchangeId} might not support WebSocket via ccxt.pro or requires instantiation.`);
+            this.orderBook = 'fetchOrderBook'
+            this.trade = 'fetchTrades'
         }
-
-        // Instantiate exchange. Note: ccxt.pro exchanges are usually accessed via ccxt.pro.binance, etc.
-        // But in recent versions, they might be under ccxt.pro[exchangeId]
-        const exchangeClass = ccxt.pro[exchangeId] || ccxt[exchangeId];
-        this.exchange = new exchangeClass();
+        if (this.exchange.options.watchOrderBook && this.exchange.options.watchOrderBook.maxRetries) {
+            this.exchange.options.watchOrderBook.maxRetries = 10;
+        }
         this.exchangeId = exchangeId;
+        this.lastNotificationTimes = {};
     }
 
-    async watchDepth(symbol, percentage, minValue) {
+    shouldNotify(symbol, type, intervalMinutes) {
+        if (!intervalMinutes || intervalMinutes <= 0) return true;
+
+        const key = `${symbol}:${type}`;
+        const lastTime = this.lastNotificationTimes[key] || 0;
+        const now = Date.now();
+
+        if (now - lastTime > intervalMinutes * 60 * 1000) {
+            this.lastNotificationTimes[key] = now;
+            return true;
+        }
+        return false;
+    }
+
+    async watchDepth(symbol, percentage, minValue, notificationInterval = 0) {
         console.log(`[${this.exchangeId}] Starting depth watch for ${symbol}`);
         while (true) {
             try {
-                const orderBook = await this.exchange.watchOrderBook(symbol);
+                const orderBook = await this.exchange[this.orderBook](symbol);
                 const bids = orderBook.bids;
                 const asks = orderBook.asks;
 
                 if (bids.length === 0 || asks.length === 0) continue;
 
                 const midPrice = (bids[0][0] + asks[0][0]) / 2;
-                const lowerBound = midPrice * (1 - percentage / 100);
-                const upperBound = midPrice * (1 + percentage / 100);
-
+                let bidQuantity = 0;
                 let bidDepthValue = 0;
                 for (const [price, amount] of bids) {
-                    if (price >= lowerBound) {
-                        bidDepthValue += price * amount;
-                    } else {
-                        break;
-                    }
+                    if (!inRangeBid(price, midPrice, percentage)) break;
+                    bidQuantity += amount;
+                    bidDepthValue += price * amount;
                 }
 
+                let askQuantity = 0;
                 let askDepthValue = 0;
                 for (const [price, amount] of asks) {
-                    if (price <= upperBound) {
-                        askDepthValue += price * amount;
-                    } else {
-                        break;
-                    }
+                    if (!inRangeAsk(price, midPrice, percentage)) break;
+                    askQuantity += amount;
+                    askDepthValue += price * amount;
                 }
 
                 // Log to DB
-                logDepth(this.exchangeId, symbol, Date.now(), bidDepthValue, askDepthValue);
+                // Note: We log the "sum product" value as depth value, but also log midPrice and quantities
+                logDepth(this.exchangeId, symbol, Date.now(), bidDepthValue, askDepthValue, midPrice, bidQuantity, askQuantity);
 
                 // Check if depth value is below threshold
                 if (bidDepthValue < minValue) {
-                    const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Bid Depth (-${percentage}%): ${bidDepthValue.toFixed(2)} < ${minValue}`;
-                    await sendLarkNotification(msg);
-                    logAlert(this.exchangeId, symbol, Date.now(), msg);
-                }
-                if (askDepthValue < minValue) {
-                    const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Ask Depth (+${percentage}%): ${askDepthValue.toFixed(2)} < ${minValue}`;
-                    await sendLarkNotification(msg);
-                    logAlert(this.exchangeId, symbol, Date.now(), msg);
+                    if (this.shouldNotify(symbol, 'depth_bid', notificationInterval)) {
+                        const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Bid Depth (-${percentage}%): ${bidDepthValue.toFixed(2)} < ${minValue} (Qty: ${bidQuantity.toFixed(4)}, Mid: ${midPrice})`;
+                        await sendLarkNotification(msg);
+                        logAlert(this.exchangeId, symbol, Date.now(), msg);
+                    }
+                } else if (askDepthValue < minValue) {
+                    if (this.shouldNotify(symbol, 'depth_ask', notificationInterval)) {
+                        const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Ask Depth (+${percentage}%): ${askDepthValue.toFixed(2)} < ${minValue} (Qty: ${askQuantity.toFixed(4)}, Mid: ${midPrice})`;
+                        await sendLarkNotification(msg);
+                        logAlert(this.exchangeId, symbol, Date.now(), msg);
+                    }
+                } else {
+                    delete this.lastNotificationTimes[`${symbol}:depth_bid`];
+                    delete this.lastNotificationTimes[`${symbol}:depth_ask`];
                 }
 
             } catch (error) {
                 console.error(`Error watching depth for ${symbol}:`, error.message);
-                // Wait a bit before retrying to avoid spamming on connection loss
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
     }
 
-    async watchTrades(symbol, maxSilenceTime) {
+    async watchTrades(symbol, maxSilenceTime, notificationInterval = 0) {
         console.log(`[${this.exchangeId}] Starting trade watch for ${symbol}`);
         let lastTradeTime = Date.now();
 
@@ -84,15 +118,17 @@ class ExchangeMonitor {
             const currentTime = Date.now();
             const silenceTime = (currentTime - lastTradeTime) / 1000;
             if (silenceTime > maxSilenceTime) {
-                const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] No trades for ${silenceTime.toFixed(0)}s (Threshold: ${maxSilenceTime}s)`;
-                await sendLarkNotification(msg);
-                logAlert(this.exchangeId, symbol, Date.now(), msg);
+                if (this.shouldNotify(symbol, 'silence', notificationInterval)) {
+                    const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] No trades for ${silenceTime.toFixed(0)}s (Threshold: ${maxSilenceTime}s)`;
+                    await sendLarkNotification(msg);
+                    logAlert(this.exchangeId, symbol, Date.now(), msg);
+                }
             }
-        }, 10000); // Check every 10 seconds
+        }, 1000);
 
         while (true) {
             try {
-                const trades = await this.exchange.watchTrades(symbol);
+                const trades = await this.exchange[this.trade](symbol);
                 if (trades.length > 0) {
                     // Update last trade time
                     lastTradeTime = trades[trades.length - 1].timestamp || Date.now();

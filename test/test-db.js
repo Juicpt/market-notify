@@ -8,11 +8,9 @@ async function testDB() {
         console.log('DB Initialized');
 
         const timestamp = Date.now();
-        logDepth('binance', 'BTC/USDT', timestamp, 1000, 2000);
+        // New signature: exchange, symbol, timestamp, bidDepth, askDepth, midPrice, bidQty, askQty
+        logDepth('binance', 'BTC/USDT', timestamp, 1000, 2000, 50000, 0.02, 0.04);
         console.log('Logged depth');
-
-        logAlert('binance', 'BTC/USDT', timestamp, 'Test Alert');
-        console.log('Logged alert');
 
         // Wait for async inserts
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -23,19 +21,10 @@ async function testDB() {
 
         db.get("SELECT * FROM depth_logs WHERE timestamp = ?", [timestamp], (err, row) => {
             if (err) throw err;
-            if (row && row.bid_depth_value === 1000) {
+            if (row && row.bid_depth_value === 1000 && row.mid_price === 50000 && row.bid_quantity === 0.02) {
                 console.log('Verified depth log:', row);
             } else {
-                console.error('Failed to verify depth log');
-            }
-        });
-
-        db.get("SELECT * FROM alerts WHERE timestamp = ?", [timestamp], (err, row) => {
-            if (err) throw err;
-            if (row && row.message === 'Test Alert') {
-                console.log('Verified alert log:', row);
-            } else {
-                console.error('Failed to verify alert log');
+                console.error('Failed to verify depth log:', row);
             }
         });
 

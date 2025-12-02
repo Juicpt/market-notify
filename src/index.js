@@ -39,13 +39,13 @@ async function startMonitoring() {
         // Check Depth
         if (item.depth) {
             // Don't await here, let it run in background
-            monitor.watchDepth(item.symbol, item.depth.percentage, item.depth.minValue);
+            monitor.watchDepth(item.symbol, item.depth.percentage, item.depth.minValue, item.notificationInterval);
         }
 
         // Check Trade Silence
         if (item.tradeSilence) {
             // Don't await here, let it run in background
-            monitor.watchTrades(item.symbol, item.tradeSilence.maxSilenceTime);
+            monitor.watchTrades(item.symbol, item.tradeSilence.maxSilenceTime, item.notificationInterval);
         }
     }
 }
