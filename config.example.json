@@ -5,7 +5,8 @@
             "symbol": "BTC/USDT",
             "depth": {
                 "percentage": 2,
-                "minValue": 1
+                "minValue": 1,
+                "duration": 60
             },
             "tradeSilence": {
                 "maxSilenceTime": 1

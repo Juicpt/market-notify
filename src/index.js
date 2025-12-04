@@ -39,7 +39,7 @@ async function startMonitoring() {
         // Check Depth
         if (item.depth) {
             // Don't await here, let it run in background
-            monitor.watchDepth(item.symbol, item.depth.percentage, item.depth.minValue, item.notificationInterval);
+            monitor.watchDepth(item.symbol, item.depth.percentage, item.depth.minValue, item.notificationInterval, item.depth.duration);
         }
 
         // Check Trade Silence

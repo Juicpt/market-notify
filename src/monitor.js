@@ -1,6 +1,6 @@
 const ccxt = require('ccxt');
-const {sendLarkNotification} = require('./notifier');
-const {logDepth, logAlert} = require('./db');
+const { sendLarkNotification } = require('./notifier');
+const { logDepth, logAlert } = require('./db');
 
 function inRangeBid(price, mid, pct) {
     return price >= mid * (1 - pct / 100);
@@ -53,8 +53,10 @@ class ExchangeMonitor {
         return false;
     }
 
-    async watchDepth(symbol, percentage, minValue, notificationInterval = 0) {
-        console.log(`[${this.exchangeId}] Starting depth watch for ${symbol}`);
+    async watchDepth(symbol, percentage, minValue, notificationInterval = 0, duration = 0) {
+        console.log(`[${this.exchangeId}] Starting depth watch for ${symbol} (Duration: ${duration}s)`);
+        let lowBidStartTime = 0;
+        let lowAskStartTime = 0;
         while (true) {
             try {
                 const orderBook = await this.exchange[this.orderBook](symbol);
@@ -85,20 +87,38 @@ class ExchangeMonitor {
                 logDepth(this.exchangeId, symbol, Date.now(), bidDepthValue, askDepthValue, midPrice, bidQuantity, askQuantity);
 
                 // Check if depth value is below threshold
+                // Check if depth value is below threshold
                 if (bidDepthValue < minValue) {
-                    if (this.shouldNotify(symbol, 'depth_bid', notificationInterval)) {
-                        const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Bid Depth (-${percentage}%): ${bidDepthValue.toFixed(2)} < ${minValue} (Qty: ${bidQuantity.toFixed(4)}, Mid: ${midPrice})`;
-                        await sendLarkNotification(msg);
-                        logAlert(this.exchangeId, symbol, Date.now(), msg);
+                    if (lowBidStartTime === 0) {
+                        lowBidStartTime = Date.now();
                     }
-                } else if (askDepthValue < minValue) {
-                    if (this.shouldNotify(symbol, 'depth_ask', notificationInterval)) {
-                        const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Ask Depth (+${percentage}%): ${askDepthValue.toFixed(2)} < ${minValue} (Qty: ${askQuantity.toFixed(4)}, Mid: ${midPrice})`;
-                        await sendLarkNotification(msg);
-                        logAlert(this.exchangeId, symbol, Date.now(), msg);
+                    const elapsed = (Date.now() - lowBidStartTime) / 1000;
+                    if (elapsed >= duration) {
+                        if (this.shouldNotify(symbol, 'depth_bid', notificationInterval)) {
+                            const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Bid Depth (-${percentage}%): ${bidDepthValue.toFixed(2)} < ${minValue} (Qty: ${bidQuantity.toFixed(4)}, Mid: ${midPrice}) for ${elapsed.toFixed(1)}s`;
+                            await sendLarkNotification(msg);
+                            logAlert(this.exchangeId, symbol, Date.now(), msg);
+                        }
                     }
                 } else {
+                    lowBidStartTime = 0;
                     delete this.lastNotificationTimes[`${symbol}:depth_bid`];
+                }
+
+                if (askDepthValue < minValue) {
+                    if (lowAskStartTime === 0) {
+                        lowAskStartTime = Date.now();
+                    }
+                    const elapsed = (Date.now() - lowAskStartTime) / 1000;
+                    if (elapsed >= duration) {
+                        if (this.shouldNotify(symbol, 'depth_ask', notificationInterval)) {
+                            const msg = `[${this.exchangeId.toUpperCase()} ${symbol}] Low Ask Depth (+${percentage}%): ${askDepthValue.toFixed(2)} < ${minValue} (Qty: ${askQuantity.toFixed(4)}, Mid: ${midPrice}) for ${elapsed.toFixed(1)}s`;
+                            await sendLarkNotification(msg);
+                            logAlert(this.exchangeId, symbol, Date.now(), msg);
+                        }
+                    }
+                } else {
+                    lowAskStartTime = 0;
                     delete this.lastNotificationTimes[`${symbol}:depth_ask`];
                 }
 
