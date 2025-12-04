@@ -11,10 +11,10 @@ function inRangeAsk(price, mid, pct) {
 }
 
 class ExchangeMonitor {
-    // orderBook = 'watchOrderBook'
-    // trade = 'watchTrades'
-    trade = 'fetchTrades'
-    orderBook = 'fetchOrderBook'
+    orderBook = 'watchOrderBook'
+    trade = 'watchTrades'
+    // trade = 'fetchTrades'
+    // orderBook = 'fetchOrderBook'
 
 
     constructor(exchangeId) {
