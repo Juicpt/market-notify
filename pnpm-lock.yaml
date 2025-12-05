@@ -15,8 +15,8 @@ importers:
         specifier: ^12.5.0
         version: 12.5.0
       ccxt:
-        specifier: ^4.0.0
-        version: 4.5.21
+        specifier: ^4.5.24
+        version: 4.5.24
       dotenv:
         specifier: ^17.0.0
         version: 17.2.3
@@ -85,8 +85,8 @@ packages:
     resolution: {integrity: sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==}
     engines: {node: '>= 0.4'}
 
-  ccxt@4.5.21:
-    resolution: {integrity: sha512-xNnnrCrOB3T1K6oHq2hIf9MycB6i7DbfMRrVbVr4H4j0i2xRKJ9k3nvpbuXnohhNkV9pfj3U5AwV4FY+ChymNg==}
+  ccxt@4.5.24:
+    resolution: {integrity: sha512-0ym0t8A4EFpxKpge12yowIkSnimtLF5PYOaANycAT8i+FqSO3KoD5qLfSK0rP69g3nnx7Q38X+9c0Rs0r74a4Q==}
     engines: {node: '>=15.0.0'}
 
   chownr@1.1.4:
@@ -377,7 +377,7 @@ snapshots:
       es-errors: 1.3.0
       function-bind: 1.1.2
 
-  ccxt@4.5.21:
+  ccxt@4.5.24:
     dependencies:
       ws: 8.18.3
     transitivePeerDependencies:
