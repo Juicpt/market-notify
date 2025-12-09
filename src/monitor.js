@@ -16,7 +16,6 @@ class ExchangeMonitor {
     // trade = 'fetchTrades'
     // orderBook = 'fetchOrderBook'
 
-
     constructor(exchangeId) {
         // Instantiate exchange. Note: ccxt.pro exchanges are usually accessed via ccxt.pro.binance, etc.
         // But in recent versions, they might be under ccxt.pro[exchangeId]
@@ -28,7 +27,7 @@ class ExchangeMonitor {
             // If ccxt.pro is not available in the free version installed, this might fail.
             // However, the standard ccxt package includes pro classes but requires authentication/license for some.
             // Many public WS endpoints are free.
-            console.warn(`Exchange ${exchangeId} might not support WebSocket via ccxt.pro or requires instantiation.`);
+            console.warn(`Exchange ${exchangeId} might not support WebSocket via ccxt.pro.`);
             this.orderBook = 'fetchOrderBook'
             this.trade = 'fetchTrades'
         }
@@ -37,6 +36,9 @@ class ExchangeMonitor {
         }
         this.exchangeId = exchangeId;
         this.lastNotificationTimes = {};
+        this.running = true;
+        this.activeWatchers = new Set();
+        this.tradeIntervals = new Map();
     }
 
     shouldNotify(symbol, type, intervalMinutes) {
@@ -55,15 +57,29 @@ class ExchangeMonitor {
 
     async watchDepth(symbol, percentage, minValue, notificationInterval = 0, duration = 0) {
         console.log(`[${this.exchangeId}] Starting depth watch for ${symbol} (Duration: ${duration}s)`);
+        const watcherId = `depth_${symbol}`;
+        this.activeWatchers.add(watcherId);
+
         let lowBidStartTime = 0;
         let lowAskStartTime = 0;
-        while (true) {
+        let consecutiveErrors = 0;
+        const MAX_CONSECUTIVE_ERRORS = 10;
+        const BASE_RETRY_DELAY = 1000;
+        const MAX_RETRY_DELAY = 60000;
+
+        while (this.running) {
             try {
                 const orderBook = await this.exchange[this.orderBook](symbol);
                 const bids = orderBook.bids;
                 const asks = orderBook.asks;
 
-                if (bids.length === 0 || asks.length === 0) continue;
+                // Reset error counter on success
+                consecutiveErrors = 0;
+
+                if (bids.length === 0 || asks.length === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
 
                 const midPrice = (bids[0][0] + asks[0][0]) / 2;
                 let bidQuantity = 0;
@@ -83,10 +99,8 @@ class ExchangeMonitor {
                 }
 
                 // Log to DB
-                // Note: We log the "sum product" value as depth value, but also log midPrice and quantities
                 logDepth(this.exchangeId, symbol, Date.now(), bidDepthValue, askDepthValue, midPrice, bidQuantity, askQuantity);
 
-                // Check if depth value is below threshold
                 // Check if depth value is below threshold
                 if (bidDepthValue < minValue) {
                     if (lowBidStartTime === 0) {
@@ -123,18 +137,38 @@ class ExchangeMonitor {
                 }
 
             } catch (error) {
-                console.error(`Error watching depth for ${symbol}:`, error.message);
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                consecutiveErrors++;
+                console.error(`[${this.exchangeId}] Error watching depth for ${symbol} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, error.message);
+
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                    console.error(`[${this.exchangeId}] Max consecutive errors reached for ${symbol} depth watch. Stopping.`);
+                    break;
+                }
+
+                // Exponential backoff with max cap
+                const delay = Math.min(BASE_RETRY_DELAY * Math.pow(2, consecutiveErrors - 1), MAX_RETRY_DELAY);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
+
+        this.activeWatchers.delete(watcherId);
+        console.log(`[${this.exchangeId}] Stopped depth watch for ${symbol}`);
     }
 
     async watchTrades(symbol, maxSilenceTime, notificationInterval = 0) {
         console.log(`[${this.exchangeId}] Starting trade watch for ${symbol}`);
+        const watcherId = `trade_${symbol}`;
+        this.activeWatchers.add(watcherId);
+
         let lastTradeTime = Date.now();
+        let consecutiveErrors = 0;
+        const MAX_CONSECUTIVE_ERRORS = 10;
+        const BASE_RETRY_DELAY = 5000;
+        const MAX_RETRY_DELAY = 60000;
 
         // Start a silence checker loop
         const silenceChecker = setInterval(async () => {
+            if (!this.running) return;
             const currentTime = Date.now();
             const silenceTime = (currentTime - lastTradeTime) / 1000;
             if (silenceTime > maxSilenceTime) {
@@ -146,18 +180,68 @@ class ExchangeMonitor {
             }
         }, 1000);
 
-        while (true) {
+        // Store interval for cleanup
+        this.tradeIntervals.set(symbol, silenceChecker);
+
+        while (this.running) {
             try {
                 const trades = await this.exchange[this.trade](symbol);
-                if (trades.length > 0) {
+                if (trades && trades.length > 0) {
                     // Update last trade time
                     lastTradeTime = trades[trades.length - 1].timestamp || Date.now();
                 }
+                // Reset error counter on success
+                consecutiveErrors = 0;
             } catch (error) {
-                console.error(`Error watching trades for ${symbol}:`, error.message);
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                consecutiveErrors++;
+                console.error(`[${this.exchangeId}] Error watching trades for ${symbol} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, error.message);
+
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                    console.error(`[${this.exchangeId}] Max consecutive errors reached for ${symbol} trade watch. Stopping.`);
+                    break;
+                }
+
+                // Exponential backoff with max cap
+                const delay = Math.min(BASE_RETRY_DELAY * Math.pow(2, consecutiveErrors - 1), MAX_RETRY_DELAY);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
+
+        // Clean up interval
+        clearInterval(silenceChecker);
+        this.tradeIntervals.delete(symbol);
+        this.activeWatchers.delete(watcherId);
+        console.log(`[${this.exchangeId}] Stopped trade watch for ${symbol}`);
+    }
+
+    async stop() {
+        console.log(`[${this.exchangeId}] Stopping monitor...`);
+        this.running = false;
+
+        // Clear all trade intervals
+        for (const [symbol, interval] of this.tradeIntervals.entries()) {
+            clearInterval(interval);
+            console.log(`[${this.exchangeId}] Cleared interval for ${symbol}`);
+        }
+        this.tradeIntervals.clear();
+
+        // Wait for all watchers to complete (with timeout)
+        const timeout = 5000;
+        const startTime = Date.now();
+        while (this.activeWatchers.size > 0 && (Date.now() - startTime) < timeout) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        // Close exchange connection if available
+        try {
+            if (this.exchange.close && typeof this.exchange.close === 'function') {
+                await this.exchange.close();
+            }
+        } catch (error) {
+            console.error(`[${this.exchangeId}] Error closing exchange:`, error.message);
+        }
+
+        console.log(`[${this.exchangeId}] Monitor stopped. Active watchers: ${this.activeWatchers.size}`);
     }
 }
 
