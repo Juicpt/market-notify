@@ -1,6 +1,6 @@
 const ccxt = require('ccxt');
-const { sendLarkNotification } = require('./notifier');
-const { logDepth, logAlert } = require('./db');
+const {sendLarkNotification} = require('./notifier');
+const {logDepth, logAlert} = require('./db');
 
 function inRangeBid(price, mid, pct) {
     return price >= mid * (1 - pct / 100);
@@ -39,6 +39,253 @@ class ExchangeMonitor {
         this.running = true;
         this.activeWatchers = new Set();
         this.tradeIntervals = new Map();
+        this.marketsLoaded = false;
+        this.validSymbols = new Set();
+    }
+
+    async loadMarkets() {
+        if (this.marketsLoaded) return;
+        try {
+            console.log(`[${this.exchangeId}] Loading markets...`);
+            await this.exchange.loadMarkets();
+            this.validSymbols = new Set(Object.keys(this.exchange.markets));
+            this.marketsLoaded = true;
+            console.log(`[${this.exchangeId}] Loaded ${this.validSymbols.size} markets`);
+        } catch (error) {
+            console.error(`[${this.exchangeId}] Failed to load markets:`, error.message);
+            throw error;
+        }
+    }
+
+    addCustomMarket(symbol, marketConfig) {
+
+        if (!this.exchange.markets) {
+            this.exchange.markets = {};
+        }
+
+        // Parse marketId from config or generate default
+        const marketId = (marketConfig && marketConfig.id) || symbol.replace('/', '').toUpperCase();
+
+        // Default market configuration
+        const defaultConfig = {
+            id: marketId,
+            symbol: symbol,
+            base: symbol.split('/')[0],
+            quote: symbol.split('/')[1],
+            baseId: symbol.split('/')[0].toUpperCase(),
+            quoteId: symbol.split('/')[1].toUpperCase(),
+            active: true,
+            index: false,
+            type: 'spot',
+            spot: true,
+            margin: false,
+            swap: false,
+            future: false,
+            option: false,
+            contract: false,
+            precision: {
+                amount: 0.01,
+                price: 0.0001,
+            },
+            limits: {
+                leverage: {},
+                amount: {
+                    min: 0.01,
+                    max: 13775781,
+                },
+                price: {
+                    min: 0.0001,
+                    max: 10000000,
+                },
+                cost: {
+                    min: 5,
+                },
+            },
+            marginModes: {},
+            info: {
+                filters: [
+                    {
+                        minPrice: 0.000001,
+                        maxPrice: 10000000.00000000,
+                        tickSize: 0.000001,
+                        filterType: "PRICE_FILTER"
+                    },
+                    {
+                        minQty: 0.01,
+                        maxQty: 13775781,
+                        stepSize: 0.01,
+                        filterType: "LOT_SIZE"
+                    },
+                    {
+                        minNotional: 5,
+                        filterType: "MIN_NOTIONAL"
+                    },
+                    {
+                        minAmount: "5",
+                        maxAmount: "999999",
+                        minBuyPrice: "0.000001",
+                        filterType: "TRADE_AMOUNT"
+                    },
+                    {
+                        maxSellPrice: "999999",
+                        buyPriceUpRate: "0.05",
+                        sellPriceDownRate: "0.05",
+                        filterType: "LIMIT_TRADING"
+                    },
+                    {
+                        buyPriceUpRate: "0.05",
+                        sellPriceDownRate: "0.05",
+                        filterType: "MARKET_TRADING"
+                    },
+                    {
+                        noAllowMarketStartTime: "0",
+                        noAllowMarketEndTime: "0",
+                        limitOrderStartTime: "0",
+                        limitOrderEndTime: "0",
+                        limitMinPrice: "0",
+                        limitMaxPrice: "0",
+                        filterType: "OPEN_QUOTE"
+                    }],
+                exchangeId: "301",
+                symbol: symbol.replace('/', ''),
+                symbolName: symbol.replace('/', ''),
+                status: "TRADING",
+                baseAsset: symbol.split('/')[0].toUpperCase(),
+                baseAssetName: symbol.split('/')[0].toUpperCase(),
+                baseAssetPrecision: "0.01",
+                quoteAsset: symbol.split('/')[1].toUpperCase(),
+                quoteAssetName: symbol.split('/')[1].toUpperCase(),
+                quotePrecision: "0.00000001",
+                icebergAllowed: false,
+                isAggregate: false,
+                allowMargin: false
+            }
+        };
+
+        // Merge with user config
+        const finalConfig = {...defaultConfig, ...marketConfig};
+
+        // Ensure base and quote are set correctly
+        if (symbol.includes('/')) {
+            finalConfig.base = finalConfig.base || symbol.split('/')[0];
+            finalConfig.quote = finalConfig.quote || symbol.split('/')[1];
+        }
+        // Add to markets
+        this.exchange.markets[symbol] = finalConfig;
+
+        // Add to markets_by_id (critical for ccxt.pro WebSocket)
+        if (!this.exchange.markets_by_id) {
+            this.exchange.markets_by_id = {};
+        }
+
+        // Check if this id already exists (ID collision with swap/future markets)
+        const existingMarket = this.exchange.markets_by_id[finalConfig.id];
+        if (existingMarket) {
+            if (Array.isArray(existingMarket)) {
+                // Already an array, check if we should replace or add
+                const spotIndex = existingMarket.findIndex(m => m.spot === true);
+                if (spotIndex >= 0) {
+                    // Replace existing spot market
+                    console.log(`[${this.exchangeId}] Replacing existing spot market for ${symbol}`);
+                    existingMarket[spotIndex] = finalConfig;
+                } else {
+                    // Add new spot market to array
+                    console.log(`[${this.exchangeId}] Warning: ID ${finalConfig.id} collision, adding spot market to array`);
+                    existingMarket.push(finalConfig);
+                }
+            } else {
+                // Single market exists, check types
+                if (existingMarket.spot && finalConfig.spot) {
+                    // Both are spot, replace
+                    console.log(`[${this.exchangeId}] Replacing existing spot market ${existingMarket.symbol} with ${symbol}`);
+                    this.exchange.markets_by_id[finalConfig.id] = finalConfig;
+                } else {
+                    // Different types, convert to array
+                    console.log(`[${this.exchangeId}] ID ${finalConfig.id} collision: ${existingMarket.type} vs ${finalConfig.type}, converting to array`);
+                    this.exchange.markets_by_id[finalConfig.id] = [existingMarket, finalConfig];
+                }
+            }
+        } else {
+            // No collision, add directly as single object
+            this.exchange.markets_by_id[finalConfig.id] = [finalConfig];
+        }
+
+        // Add to symbols array
+        if (!this.exchange.symbols) {
+            this.exchange.symbols = [];
+        }
+        if (!this.exchange.symbols.includes(symbol)) {
+            this.exchange.symbols.push(symbol);  // Push symbol, not id!
+        }
+
+        // Add to ids array
+        if (!this.exchange.ids) {
+            this.exchange.ids = [];
+        }
+        if (!this.exchange.ids.includes(finalConfig.id)) {
+            this.exchange.ids.push(finalConfig.id);
+        }
+
+        // Add to validSymbols
+        this.validSymbols.add(symbol);
+
+        console.log(`[${this.exchangeId}] Added custom market: ${symbol} (id: ${finalConfig.id})`);
+        console.log(`[${this.exchangeId}]   - markets[${symbol}]: ✓`);
+        console.log(`[${this.exchangeId}]   - markets_by_id[${finalConfig.id}]: ${Array.isArray(this.exchange.markets_by_id[finalConfig.id]) ? 'array' : 'object'}`);
+
+        // Debug: check if market() can resolve this symbol
+        try {
+            const testMarket = this.exchange.market(symbol);
+            console.log(`[${this.exchangeId}]   - market('${symbol}') resolved: ✓ (type: ${testMarket.type})`);
+        } catch (error) {
+            console.error(`[${this.exchangeId}]   - market('${symbol}') failed: ${error.message}`);
+        }
+
+        return finalConfig;
+    }
+
+    async validateSymbol(symbol) {
+        if (!this.marketsLoaded) {
+            await this.loadMarkets();
+        }
+
+        // Check if symbol exists
+        if (this.validSymbols.has(symbol)) {
+            console.log(`[${this.exchangeId}] ✓ Symbol ${symbol} validated`);
+            return symbol;
+        }
+
+        // Try to find similar symbols
+        const base = symbol.split('/')[0];
+        const quote = symbol.split('/')[1];
+
+        const similarSymbols = Array.from(this.validSymbols).filter(s => {
+            const sBase = s.split('/')[0];
+            const sQuote = s.split('/')[1];
+            return sBase.includes(base) || (quote && sQuote.includes(quote)) ||
+                   base.includes(sBase) || (quote && quote.includes(sQuote));
+        }).slice(0, 10);
+
+        console.error(`\n❌ Symbol ${symbol} not found on ${this.exchangeId}`);
+        console.error(`   Total available markets: ${this.validSymbols.size}`);
+
+        if (similarSymbols.length > 0) {
+            console.error(`   Similar symbols found:`);
+            similarSymbols.forEach(s => {
+                const m = this.exchange.markets[s];
+                console.error(`     - ${s} (id: ${m.id}, type: ${m.type || 'spot'})`);
+            });
+            console.error(`\n   💡 Try using one of the similar symbols above, or use "customMarket" if the symbol should exist.`);
+        } else {
+            console.error(`   No similar symbols found.`);
+            console.error(`\n   💡 Use: node scripts/find-symbols.js ${this.exchangeId} ${base}`);
+            console.error(`   Or add "customMarket" configuration if you're sure this symbol exists.`);
+        }
+
+        console.error(`   📚 Run "node scripts/find-symbols.js ${this.exchangeId} ${base}" for help\n`);
+
+        const errorMsg = `Symbol ${symbol} not found on ${this.exchangeId}`;
+        throw new Error(errorMsg);
     }
 
     shouldNotify(symbol, type, intervalMinutes) {
@@ -55,8 +302,17 @@ class ExchangeMonitor {
         return false;
     }
 
-    async watchDepth(symbol, percentage, minValue, notificationInterval = 0, duration = 0) {
+    async watchDepth(symbol, percentage, minValue, notificationInterval = 0, duration = 0, useRawId = false) {
         console.log(`[${this.exchangeId}] Starting depth watch for ${symbol} (Duration: ${duration}s)`);
+
+        // Validate symbol before starting
+        try {
+            await this.validateSymbol(symbol);
+        } catch (error) {
+            console.error(`[${this.exchangeId}] ${error.message}`);
+            return;
+        }
+
         const watcherId = `depth_${symbol}`;
         this.activeWatchers.add(watcherId);
 
@@ -67,8 +323,10 @@ class ExchangeMonitor {
         const BASE_RETRY_DELAY = 1000;
         const MAX_RETRY_DELAY = 60000;
 
+
         while (this.running) {
             try {
+                // ccxt will use exchange.markets[symbol] directly, avoiding markets_by_id lookup
                 const orderBook = await this.exchange[this.orderBook](symbol);
                 const bids = orderBook.bids;
                 const asks = orderBook.asks;
@@ -155,8 +413,17 @@ class ExchangeMonitor {
         console.log(`[${this.exchangeId}] Stopped depth watch for ${symbol}`);
     }
 
-    async watchTrades(symbol, maxSilenceTime, notificationInterval = 0) {
+    async watchTrades(symbol, maxSilenceTime, notificationInterval = 0, useRawId = false) {
         console.log(`[${this.exchangeId}] Starting trade watch for ${symbol}`);
+
+        // Validate symbol before starting
+        try {
+            await this.validateSymbol(symbol);
+        } catch (error) {
+            console.error(`[${this.exchangeId}] ${error.message}`);
+            return;
+        }
+
         const watcherId = `trade_${symbol}`;
         this.activeWatchers.add(watcherId);
 

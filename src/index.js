@@ -117,6 +117,22 @@ async function startMonitoring() {
         try {
             monitors[exchangeId] = new ExchangeMonitor(exchangeId);
             console.log(`Initialized monitor for ${exchangeId}`);
+
+            // Preload markets
+            await monitors[exchangeId].loadMarkets();
+
+            // Add custom markets for this exchange
+            const customMarkets = config.monitors.filter(m =>
+                m.exchange === exchangeId && m.customMarket
+            );
+
+            for (const item of customMarkets) {
+                try {
+                    monitors[exchangeId].addCustomMarket(item.symbol, item.customMarket);
+                } catch (error) {
+                    console.error(`Failed to add custom market ${item.symbol} for ${exchangeId}:`, error.message);
+                }
+            }
         } catch (error) {
             console.error(`Failed to initialize monitor for ${exchangeId}:`, error.message);
         }
@@ -129,18 +145,26 @@ async function startMonitoring() {
 
         // Check Depth
         if (item.depth) {
-            monitor.watchDepth(item.symbol, item.depth.percentage, item.depth.minValue, item.notificationInterval, item.depth.duration || 0)
-                .catch(error => {
-                    console.error(`Fatal error in depth watch for ${item.symbol}:`, error);
-                });
+            monitor.watchDepth(
+                item.symbol,
+                item.depth.percentage,
+                item.depth.minValue,
+                item.notificationInterval,
+                item.depth.duration || 0
+            ).catch(error => {
+                console.error(`Fatal error in depth watch for ${item.symbol}:`, error);
+            });
         }
 
         // Check Trade Silence
         if (item.tradeSilence) {
-            monitor.watchTrades(item.symbol, item.tradeSilence.maxSilenceTime, item.notificationInterval || 0)
-                .catch(error => {
-                    console.error(`Fatal error in trade watch for ${item.symbol}:`, error);
-                });
+            monitor.watchTrades(
+                item.symbol,
+                item.tradeSilence.maxSilenceTime,
+                item.notificationInterval || 0
+            ).catch(error => {
+                console.error(`Fatal error in trade watch for ${item.symbol}:`, error);
+            });
         }
     }
 
